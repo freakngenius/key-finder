@@ -81,6 +81,9 @@
         {kind:'range', label:'Tone',    key:'brightness', min:600, max:6000, step:100, unit:'Hz'},
         {kind:'range', label:'Sustain', key:'sustain', min:0.4, max:2.5, step:0.1, unit:'s'},
       ]},
+      {title:'Listener', rows:[
+        {kind:'toggle', label:'Harmonic cleanup', key:'harmonicClean'},
+      ]},
       {title:'Playback', rows:[
         {kind:'range', label:'Tempo', key:'tempo', min:40, max:180, step:1, unit:'BPM'},
         {kind:'toggle', label:'Arpeggiate', key:'arpeggiate'},
@@ -95,7 +98,7 @@
           scaleColor:'#43E08A', chordColor:'#FFD23F', seventhColor:'#B98CFF', background:'#14161B',
           cornerStyle:'Rounded', glow:1, pianoSize:1.8, multiSize:1, labelMode:'Sharps',
           chordType:'Triads', showNumerals:true, scaleInChord:true,
-          waveform:'Triangle', volume:55, brightness:2600, sustain:1.1,
+          waveform:'Triangle', volume:55, brightness:2600, sustain:1.1, harmonicClean:true,
           tempo:67, arpeggiate:false, loop:true,
         },
       };
@@ -103,6 +106,11 @@
       this.asideEl = document.getElementById('aside');
       this.mainEl = document.getElementById('main');
       this._syncers = [];
+      this.acc = new Array(12).fill(0);
+      this.live = new Array(12).fill(0);
+      this.cands = [];
+      this.listening = false;
+      this.micError = null;
       this.buildSidebar();
       this.mainEl.addEventListener('click', e => {
         const t = e.target.closest('[data-act]'); if(!t) return;
@@ -115,8 +123,13 @@
           case 'prog':  this.pickProg(+a.i); break;
           case 'step':  this.pickStep(+a.deg); break;
           case 'play':  this.togglePlay(); break;
-          case 'view':  this.setState({view:a.val}); break;
+          case 'view':  if(a.val!=='listen' && a.val!=='live' && this.listening) this.stopListen(); this.setState({view:a.val}); break;
           case 'playchord': this.pickStep(+a.deg); break;
+          case 'listen_start': this.startListen(); break;
+          case 'listen_stop':  this.stopListen(); break;
+          case 'listen_shortcut': if(this.listening){ this.stopListen(); } else { this.setState({view:'listen'}); this.startListen(); } break;
+          case 'listen_reset': this.acc=new Array(12).fill(0); this.live=new Array(12).fill(0); this.cands=[]; this.micError=null; this.render(); break;
+          case 'applykey': this.applyKey(+a.root, a.scale); break;
           case 'd1':    this.setState(s=>({d1:!s.d1})); break;
           case 'd2':    this.setState(s=>({d2:!s.d2})); break;
         }
@@ -289,6 +302,177 @@
       if(this.state.playing) this.setState({playing:false});
     }
 
+    /* ---------- listener (mic -> chromagram -> key) ---------- */
+    async startListen(){
+      if(this.listening) return;
+      this.micError=null;
+      try{
+        if(!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) throw {name:'Unsupported'};
+        const stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
+        this.ensureAudio();
+        this.micStream=stream;
+        this.micSrc=this.ctx.createMediaStreamSource(stream);
+        this.analyser=this.ctx.createAnalyser();
+        this.analyser.fftSize=8192;
+        this.analyser.smoothingTimeConstant=0.5;
+        this.micSrc.connect(this.analyser); // not connected to destination -> no feedback
+        this.freqData=new Float32Array(this.analyser.frequencyBinCount);
+        this.listening=true;
+        this._listenTimer=setInterval(()=>this.analyseFrame(),130);
+        this.render();
+      }catch(e){
+        const n=e&&e.name;
+        this.micError = n==='NotAllowedError'||n==='SecurityError' ? 'Mic blocked. Click the mic/lock icon in your browser’s address bar, set Microphone to Allow, then reload. This embedded preview can stay blocked — the live site is most reliable.'
+          : n==='NotFoundError'||n==='DevicesNotFoundError' ? 'No microphone found. Connect or enable a mic and try again.'
+          : n==='Unsupported' ? 'Microphone not available here. Open the live site (https) to use the listener.'
+          : 'Could not start the microphone ('+(n||'error')+').';
+        this.listening=false;
+        this.render();
+      }
+    }
+    stopListen(){
+      if(this._listenTimer){ clearInterval(this._listenTimer); this._listenTimer=null; }
+      if(this.micStream){ this.micStream.getTracks().forEach(t=>t.stop()); this.micStream=null; }
+      if(this.micSrc){ try{this.micSrc.disconnect();}catch(_){} this.micSrc=null; }
+      this.analyser=null;
+      if(this.listening){ this.listening=false; this.render(); }
+    }
+    analyseFrame(){
+      if(!this.analyser) return;
+      this.analyser.getFloatFrequencyData(this.freqData);
+      const binHz=this.ctx.sampleRate/this.analyser.fftSize;
+      const minBin=Math.max(1,Math.floor(65/binHz));            // ~C2
+      const maxBin=Math.min(this.freqData.length-1,Math.ceil(2093/binHz)); // ~C7
+      let mx=-Infinity;
+      for(let i=minBin;i<=maxBin;i++){ if(this.freqData[i]>mx) mx=this.freqData[i]; }
+      const frame=new Array(12).fill(0);
+      let any=false;
+      if(mx>-90){
+        const floor=mx-30;
+        for(let i=minBin;i<=maxBin;i++){
+          const db=this.freqData[i];
+          if(db<floor) continue;
+          const f=i*binHz;
+          const mag=Math.pow(10, db/20);
+          const midi=69+12*Math.log2(f/440);
+          const pc=((Math.round(midi)%12)+12)%12;
+          frame[pc]+=mag; any=true;
+        }
+      }
+      const sum=frame.reduce((a,b)=>a+b,0);
+      if(sum>0) for(let p=0;p<12;p++) frame[p]/=sum;
+      if(this.P('harmonicClean',true) && sum>0){
+        const sup=this.suppressHarmonics(frame);
+        let s2=0; for(let p=0;p<12;p++) s2+=sup[p];
+        if(s2>0) for(let p=0;p<12;p++) frame[p]=sup[p]/s2;
+      }
+      for(let p=0;p<12;p++) this.live[p]=this.live[p]*0.6+frame[p]*0.4;
+      if(any && sum>0){ for(let p=0;p<12;p++) this.acc[p]+=frame[p]; }
+      this.cands=this.detectKeys(this.acc);
+      this.updateListen();
+    }
+    listenViz(){
+      const live=this.live||new Array(12).fill(0);
+      const maxLive=Math.max.apply(null, live);
+      const hasSignal=maxLive>0.02;
+      let maxPc=0; for(let i=1;i<12;i++){ if(live[i]>live[maxPc]) maxPc=i; }
+      const G=this.hexToRgb(this.state.cfg.scaleColor);
+      const barH=this._listenBarH||130, out=[];
+      for(let pc=0;pc<12;pc++){
+        const ratio = maxLive>0 ? live[pc]/maxLive : 0;
+        const h=Math.max(2, Math.round(ratio*barH));
+        let bg, lc;
+        if(hasSignal && pc===maxPc){ bg='linear-gradient(180deg,rgba('+G+',0.95),rgba('+G+',0.2))'; lc='#cfeede'; }
+        else if(hasSignal && ratio>=0.12){ bg='linear-gradient(180deg,#525863,#262b32)'; lc='#aab0bb'; }
+        else { bg='#161920'; lc=this.BLACK.includes(pc)?'#4a505c':'#6b7079'; }
+        out.push({h,bg,lc});
+      }
+      return {bars:out, barH, maxPc, hasSignal};
+    }
+    listenCandData(){
+      const cands=this.cands||[];
+      if(!cands.length) return [];
+      const top=Math.max(0.0001, cands[0].score);
+      return cands.map((c,i)=>({
+        root:c.root, scale:c.scale,
+        label:this.noteName(c.root)+' '+(c.scale==='major'?'Major':'Minor'),
+        pct:Math.max(4, Math.round(Math.max(0,c.score)/top*100)),
+        best:i===0
+      }));
+    }
+    listenStatusHtml(){
+      const cfg=this.state.cfg;
+      const supported=(typeof navigator!=='undefined' && navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+      if(this.micError) return '<span style="color:#ff9d7c;font-size:13px;line-height:1.4;">'+this.micError+'</span>';
+      if(this.listening) return '<span style="color:'+cfg.scaleColor+';font-size:13px;">&#9679; Listening… keep it playing. Longer listening = more accurate.</span>';
+      if(!supported) return '<span style="color:#ffb38a;font-size:13px;line-height:1.4;">Mic isn’t available in this preview. Open the live site (https) to use the listener.</span>';
+      return '<span style="color:#6b717b;font-size:13px;">Point your device at the room, start, and let it listen.</span>';
+    }
+    updateListen(){
+      if(this.state.view!=='listen' && this.state.view!=='live') return;
+      const cfg=this.state.cfg, G=this.hexToRgb(cfg.scaleColor), Y=this.hexToRgb(cfg.chordColor);
+      const viz=this.listenViz();
+      for(let pc=0;pc<12;pc++){
+        const bar=document.getElementById('kfbar-'+pc), lbl=document.getElementById('kflbl-'+pc);
+        if(bar){ bar.style.height=viz.bars[pc].h+'px'; bar.style.background=viz.bars[pc].bg; }
+        if(lbl){ lbl.style.color=viz.bars[pc].lc; }
+      }
+      const cd=this.listenCandData();
+      const msg=document.getElementById('kfcandmsg'); if(msg) msg.style.display=cd.length?'none':'block';
+      for(let i=0;i<3;i++){
+        const btn=document.getElementById('kfcand-'+i); if(!btn) continue;
+        const c=cd[i];
+        if(!c){ btn.style.display='none'; continue; }
+        const best=i===0;
+        btn.style.display='flex';
+        btn.dataset.root=c.root; btn.dataset.scale=c.scale;
+        btn.style.border='1px solid '+(best?'rgba('+Y+',.7)':'#23262c');
+        const name=document.getElementById('kfcandname-'+i);
+        if(name){ name.textContent=c.label; name.style.color=best?cfg.chordColor:'#cfd2d8'; name.style.fontSize=(best?'18':'15')+'px'; }
+        const tag=document.getElementById('kfcandtag-'+i); if(tag) tag.textContent=best?'Best · tap to use':'Tap to use';
+        const cbar=document.getElementById('kfcandbar-'+i);
+        if(cbar){ cbar.style.width=c.pct+'%'; cbar.style.background=best?'rgba('+Y+',.9)':'rgba('+G+',.6)'; }
+      }
+      const st=document.getElementById('kfstatus'); if(st) st.innerHTML=this.listenStatusHtml();
+    }
+    suppressHarmonics(ch){
+      // a note's main false echoes land a perfect fifth above (3rd harmonic, +7)
+      // and a major third above (5th harmonic, +4). Subtract a fraction of the
+      // would-be fundamental sitting a fifth/third below each bar.
+      const out=new Array(12);
+      for(let q=0;q<12;q++){
+        const fifthBelow=ch[(q-7+12)%12];
+        const thirdBelow=ch[(q-4+12)%12];
+        out[q]=Math.max(0, ch[q] - 0.45*fifthBelow - 0.25*thirdBelow);
+      }
+      return out;
+    }
+    detectKeys(acc){
+      const total=acc.reduce((a,b)=>a+b,0);
+      if(total<=0) return [];
+      const MAJ=[6.35,2.23,3.48,2.33,4.38,4.09,2.52,5.19,2.39,3.66,2.29,2.88];
+      const MIN=[6.33,2.68,3.52,5.38,2.60,3.53,2.54,4.75,3.98,2.69,3.34,3.17];
+      const corr=(a,b)=>{
+        let ma=0,mb=0; for(let i=0;i<12;i++){ma+=a[i];mb+=b[i];} ma/=12;mb/=12;
+        let num=0,da=0,db=0;
+        for(let i=0;i<12;i++){const x=a[i]-ma,y=b[i]-mb; num+=x*y; da+=x*x; db+=y*y;}
+        return (da&&db)? num/Math.sqrt(da*db) : 0;
+      };
+      const out=[];
+      for(let r=0;r<12;r++){
+        const majP=[],minP=[];
+        for(let i=0;i<12;i++){ majP[i]=MAJ[((i-r)%12+12)%12]; minP[i]=MIN[((i-r)%12+12)%12]; }
+        out.push({root:r,scale:'major',score:corr(acc,majP)});
+        out.push({root:r,scale:'minor',score:corr(acc,minP)});
+      }
+      out.sort((a,b)=>b.score-a.score);
+      return out.slice(0,3);
+    }
+    applyKey(r,scale){
+      if(this.state.view==='live'){ this.setState({root:r, scale:scale, chord:null, prog:null}); }
+      else { this.stopListen(); this.setState({root:r, scale:scale, chord:null, prog:null, view:'single'}); }
+    }
+
     /* ---------- sidebar (built once) ---------- */
     buildSidebar(){
       const cfg=this.state.cfg;
@@ -441,6 +625,7 @@
       const R=px=> sharp?'0px':px+'px';
       const k=this.P('pianoSize',1);
       const mz=this.P('multiSize',1);
+      this._listenBarH = S.view==='live' ? 104 : 130;
       const showNum=cfg.showNumerals!==false;
       const nm=pc=>this.noteName(pc);
       const scalePcs=this.scalePcs();
@@ -535,6 +720,66 @@
         const body='<div style="position:relative;width:100%;"><div style="display:flex;gap:2px;width:100%;">'+whites+'</div>'+blacks+'</div>';
         return '<div data-act="playchord" data-deg="'+deg+'" style="'+css(card)+'">'+head+body+'</div>';
       };
+
+      /* responsive scale piano (shows in-key notes + selected chord); used by Live view */
+      const scalePiano=(H)=>{
+        const whites=[0,2,4,5,7,9,11].map(pc=>{
+          const o=respWhite(H); colorize(o,pc,false,tri,cRoot,sevPc,dimScale);
+          if(chord==null && pc===S.root){ o.borderColor='rgba('+G+',0.95)'; o.color='#eafff5'; o.background='linear-gradient(180deg,rgba('+G+',0.42) 0%,#0e1014 64%)'; o.boxShadow='inset 0 -30px 30px -14px rgba('+G+',0.85)'; }
+          if(fl(pc)) o.filter='brightness(1.7)';
+          return '<div data-act="key" data-pc="'+pc+'" style="'+css(o)+'"><span style="pointer-events:none">'+nm(pc)+'</span></div>';
+        }).join('');
+        const blacks=[[1,0],[3,1],[6,3],[8,4],[10,5]].map(([pc,wi])=>{
+          const o=respBlack(H); o.left=((wi+1)*WHITEFRAC - BWPCT/2)+'%'; colorize(o,pc,true,tri,cRoot,sevPc,dimScale);
+          if(chord==null && pc===S.root){ o.borderColor='rgba('+G+',0.95)'; o.color='#eafff5'; o.background='linear-gradient(180deg,#08090c 0%,'+this.mix(G,0.5)+' 100%)'; }
+          if(fl(pc)) o.filter='brightness(1.7)';
+          return '<div data-act="key" data-pc="'+pc+'" style="'+css(o)+'"><span style="pointer-events:none">'+nm(pc)+'</span></div>';
+        }).join('');
+        const panel={ background:'linear-gradient(180deg,#101218,#0a0b0e)', border:'1px solid #1a1d22', borderRadius:R(18), padding:'16px', boxShadow:'0 24px 60px -24px rgba(0,0,0,.9)', overflow:'hidden' };
+        return '<div style="'+css(panel)+'"><div style="position:relative;width:100%;max-width:'+Math.round(H*1.95)+'px;margin:0 auto;"><div style="display:flex;gap:3px;width:100%;">'+whites+'</div>'+blacks+'</div></div>';
+      };
+
+      /* listener panel (visualizer + candidates), shared by Listen and Live views */
+      const listenerPanel=()=>{
+        const supported = (typeof navigator!=='undefined' && navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+        const viz=this.listenViz();
+        const bars=this.NAMES.map((n0,pc)=>{
+          const b=viz.bars[pc];
+          return '<div style="flex:1 1 0;display:flex;flex-direction:column;align-items:center;gap:7px;min-width:0;">'+
+            '<div style="height:'+viz.barH+'px;width:100%;display:flex;align-items:flex-end;">'+
+              '<div id="kfbar-'+pc+'" style="width:100%;height:'+b.h+'px;border-radius:4px 4px 0 0;background:'+b.bg+';transition:height .1s ease,background .15s ease;"></div>'+
+            '</div>'+
+            '<span id="kflbl-'+pc+'" style="font-size:11px;font-weight:600;color:'+b.lc+';">'+this.noteName(pc)+'</span>'+
+          '</div>';
+        }).join('');
+        const cd=this.listenCandData();
+        const slots=[0,1,2].map(i=>{
+          const c=cd[i], show=!!c, best=show&&i===0;
+          const accent= best? cfg.chordColor : '#cfd2d8';
+          return '<button type="button" id="kfcand-'+i+'" data-act="applykey" data-root="'+(show?c.root:0)+'" data-scale="'+(show?c.scale:'major')+'" style="flex-direction:column;gap:9px;width:100%;text-align:left;padding:13px 16px;background:#0e1014;border:1px solid '+(best?'rgba('+Y+',.7)':'#23262c')+';border-radius:'+R(12)+';cursor:pointer;transition:all .12s ease;display:'+(show?'flex':'none')+';">'+
+            '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;pointer-events:none;">'+
+              '<span id="kfcandname-'+i+'" style="font-size:'+(best?'18':'15')+'px;font-weight:600;color:'+accent+';letter-spacing:.3px;">'+(show?c.label:'')+'</span>'+
+              '<span id="kfcandtag-'+i+'" style="font-size:10px;color:#6b7079;letter-spacing:1px;text-transform:uppercase;">'+(best?'Best · tap to use':'Tap to use')+'</span>'+
+            '</div>'+
+            '<div style="height:6px;width:100%;background:#1b1e23;border-radius:3px;overflow:hidden;pointer-events:none;"><div id="kfcandbar-'+i+'" style="height:100%;width:'+(show?c.pct:0)+'%;background:'+(best?'rgba('+Y+',.9)':'rgba('+G+',.6)')+';border-radius:3px;transition:width .15s ease;"></div></div>'+
+          '</button>';
+        }).join('');
+        const candMsg='<div id="kfcandmsg" style="'+(cd.length?'display:none;':'')+'color:#6b717b;font-size:13px;padding:4px 2px;">Start listening and play for a few seconds. The most likely keys will rank here.</div>';
+        const startBtn = this.listening
+          ? '<button type="button" data-act="listen_stop" style="padding:11px 22px;border:1px solid #2a2d34;background:linear-gradient(180deg,#37201a,#190f0c);color:#ff9d7c;border-radius:'+R(11)+';font-weight:600;letter-spacing:1.5px;font-size:13px;cursor:pointer;">&#9632;&nbsp;&nbsp;STOP</button>'
+          : '<button type="button" data-act="listen_start" style="padding:11px 22px;border:1px solid #2a2d34;background:'+(supported?'#16181d':'#1a1113')+';color:'+(supported?'#e7e9ec':'#9a8b8b')+';border-radius:'+R(11)+';font-weight:600;letter-spacing:1.5px;font-size:13px;cursor:pointer;">&#9679;&nbsp;&nbsp;START LISTENING</button>';
+        const resetBtn = (this.acc && this.acc.some(x=>x>0)) ? '<button type="button" data-act="listen_reset" style="padding:11px 16px;border:1px solid #23262c;background:transparent;color:#9aa0aa;border-radius:'+R(11)+';font-weight:600;letter-spacing:.5px;font-size:12px;cursor:pointer;">RESET</button>' : '';
+        const panel={ background:'linear-gradient(180deg,#101218,#0a0b0e)', border:'1px solid #1a1d22', borderRadius:R(18), padding:'20px', display:'flex', flexDirection:'column', gap:'18px', boxShadow:'0 24px 60px -24px rgba(0,0,0,.9)' };
+        return '<div style="'+css(panel)+'">'+
+            '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">'+startBtn+resetBtn+'<div id="kfstatus" style="flex:1 1 150px;min-width:0;">'+this.listenStatusHtml()+'</div></div>'+
+            '<div style="display:flex;gap:5px;align-items:flex-end;padding:4px 0 2px;">'+bars+'</div>'+
+            '<div style="display:flex;flex-direction:column;gap:9px;">'+
+              '<span style="font-size:11px;letter-spacing:2.4px;color:#5f656e;text-transform:uppercase;">Likely key</span>'+
+              slots+candMsg+
+            '</div>'+
+          '</div>';
+      };
+
       const whitePcs=[0,2,4,5,7,9,11];
       const whiteHtml=whitePcs.map(pc=>
         '<div data-act="key" data-pc="'+pc+'" style="'+css(keyStyle(pc,false))+'"><span style="pointer-events:none">'+nm(pc)+'</span></div>'
@@ -656,10 +901,17 @@
       const d1Body = S.d1 ? '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(66px,1fr));gap:7px;padding-top:14px;">'+chordHtml+'</div>' : '';
       const d2Body = S.d2 ? '<div style="display:flex;flex-direction:column;gap:8px;padding-top:14px;">'+progHtml+stepsBlock+'</div>' : '';
 
+      const listenShortcut =
+        '<button type="button" data-act="listen_shortcut" style="display:flex;align-items:center;justify-content:center;gap:9px;width:100%;padding:13px;border-radius:'+R(12)+';cursor:pointer;font-family:var(--font-ui),sans-serif;font-size:12px;font-weight:600;letter-spacing:1.6px;text-transform:uppercase;'+
+          (this.listening
+            ? 'border:1px solid #5a2e26;background:linear-gradient(180deg,#37201a,#190f0c);color:#ff9d7c;'
+            : 'border:1px solid rgba('+G+',.45);background:#0e1014;color:'+cfg.scaleColor+';')+'">'+
+          (this.listening? '&#9632;&nbsp;Stop Listening' : '&#9679;&nbsp;Start Listening')+'</button>';
       const labelCol=
         '<div style="flex:1 1 210px;min-width:188px;max-width:300px;display:flex;flex-direction:column;gap:24px;">'+
           '<div><h1 style="margin:0;font-family:var(--font-display),sans-serif;font-weight:400;letter-spacing:4px;font-size:18px;line-height:1;color:#fff;text-transform:uppercase;">Key Finder</h1>'+
           '<p style="margin:9px 0 0;color:#6b717b;font-size:12.5px;letter-spacing:.3px;line-height:1.45;">Tap keys and chords to hear them. In-key notes glow.</p></div>'+
+          listenShortcut+
           '<div style="display:flex;flex-direction:column;gap:0;">'+
             '<button type="button" data-act="d1" style="'+css(drawerHead)+'"><span>Chords in this key</span><span style="'+css(chev(S.d1))+'">▾</span></button>'+d1Body+
           '</div>'+
@@ -669,17 +921,20 @@
         '</div>';
 
       /* view toggle */
-      const viewSeg=v=>({ padding:'8px 15px', borderRadius:R(8), fontFamily:'var(--font-ui),sans-serif', fontSize:'12px',
+      const viewSeg=v=>({ padding:'8px 13px', borderRadius:R(8), fontFamily:'var(--font-ui),sans-serif', fontSize:'12px',
         fontWeight:600, letterSpacing:'.8px', cursor:'pointer', border:'none', transition:'all .12s ease',
         background: S.view===v?'#262a31':'transparent', color: S.view===v?'#fff':'#7c828c',
         boxShadow: S.view===v?'inset 0 0 0 1px #3a3f47':'none', textTransform:'uppercase', whiteSpace:'nowrap' });
+      const viewWrap=Object.assign({},toggleWrap,{flexWrap:'wrap'});
       const viewRow=
-        '<div style="display:flex;align-items:center;justify-content:space-between;gap:16px;">'+
+        '<div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;">'+
           '<span style="font-size:11px;letter-spacing:2.4px;color:#5f656e;text-transform:uppercase;">View</span>'+
-          '<div style="'+css(toggleWrap)+'">'+
+          '<div style="'+css(viewWrap)+'">'+
             '<button type="button" data-act="view" data-val="single" style="'+css(viewSeg('single'))+'">Single</button>'+
             '<button type="button" data-act="view" data-val="chords" style="'+css(viewSeg('chords'))+'">Chords</button>'+
             '<button type="button" data-act="view" data-val="progression" style="'+css(viewSeg('progression'))+'">Progression</button>'+
+            '<button type="button" data-act="view" data-val="listen" style="'+css(viewSeg('listen'))+'">Listen</button>'+
+            '<button type="button" data-act="view" data-val="live" style="'+css(viewSeg('live'))+'">Live</button>'+
           '</div>'+
         '</div>';
 
@@ -724,6 +979,10 @@
           const cols = degs.length<=2?'repeat('+degs.length+',minmax(0,1fr))':'repeat(auto-fit,minmax('+Math.round(208*mz)+'px,1fr))';
           pianoContent=bar+'<div style="display:grid;grid-template-columns:'+cols+';gap:'+Math.round(12*mz)+'px;">'+grid+'</div>';
         }
+      } else if(S.view==='listen'){
+        pianoContent=
+          listenerPanel()+
+          '<span style="display:block;margin-top:14px;font-size:11.5px;color:#565c6b;line-height:1.45;">Best guess from a live room is approximate. A clean source reads best. Tap a key to load it into the piano. Try the Live view to keep the piano and chords visible while it listens.</span>';
       } else {
         pianoContent=
           '<div style="'+css(panelStyle)+'">'+
@@ -743,6 +1002,24 @@
         '</div>';
 
       const wrapMax = S.sideOpen ? '1180px' : 'none';
+      if(S.view==='live'){
+        const liveReadout='<div style="'+css(readoutBox)+'">'+
+            '<span style="color:'+titleColor+';font-size:18px;font-weight:600;letter-spacing:.5px;font-family:var(--font-display),sans-serif;">'+readoutTitle+'</span>'+
+            '<span style="color:#3a3e45;margin:0 12px;font-size:15px;">·</span>'+
+            '<span style="color:#9aa0aa;font-size:15px;letter-spacing:3px;font-weight:500;">'+readoutNotes+'</span>'+
+          '</div>';
+        const chordGrid='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(74px,1fr));gap:7px;">'+chordHtml+'</div>';
+        const leftPane='<div style="flex:1 1 290px;min-width:260px;max-width:380px;display:flex;flex-direction:column;gap:12px;">'+
+            '<span style="font-size:11px;letter-spacing:2.4px;color:#5f656e;text-transform:uppercase;">Listening</span>'+
+            listenerPanel()+
+          '</div>';
+        const rightPane='<div style="flex:2 1 430px;min-width:320px;display:flex;flex-direction:column;gap:16px;">'+
+            rootRow+scaleRow+scalePiano(168)+liveReadout+
+            '<div style="display:flex;flex-direction:column;gap:10px;"><span style="font-size:11px;letter-spacing:2.4px;color:#5f656e;text-transform:uppercase;">Chords in this key</span>'+chordGrid+'</div>'+
+          '</div>';
+        this.mainEl.innerHTML='<div style="display:flex;flex-direction:column;gap:18px;max-width:'+wrapMax+';margin:0;">'+viewRow+'<div style="display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap;">'+leftPane+rightPane+'</div></div>';
+        return;
+      }
       this.mainEl.innerHTML='<div style="display:flex;gap:28px;align-items:flex-start;flex-wrap:wrap;max-width:'+wrapMax+';margin:0;">'+labelCol+pianoCol+'</div>';
     }
   }
