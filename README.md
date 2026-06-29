@@ -32,6 +32,12 @@ Static site. Push to `main` and Vercel auto-deploys. The service worker uses net
 
 Send people the live URL. They install it the same way. No app store, no signing.
 
+## Shipping an update (so users get the "Update app" prompt)
+
+The app polls `version.json`. When the version it loaded with differs from the deployed one, an "Update app" button appears at the top of the in-app Settings panel; clicking it reloads to the new version.
+
+So each time you push a change, bump the number in `version.json`, e.g. `{ "version": "2026.06.30.1" }`. That single edit is what triggers the prompt for anyone with the app open. (The page itself already updates on reload regardless, since the service worker is network-first for the page.)
+
 ## Microphone
 
 The Live key-detection listener needs mic permission and a secure context (https), which the deployed site provides. The first time, the browser asks to allow the mic.

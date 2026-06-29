@@ -149,6 +149,23 @@
       });
       this.render();
       this.addCredit();
+      this.checkVersion();
+      setInterval(()=>this.checkVersion(), 5*60*1000);
+      if(typeof window!=='undefined') window.addEventListener('focus', ()=>this.checkVersion());
+    }
+
+    checkVersion(){
+      try{
+        fetch('version.json?ts='+Date.now(), {cache:'no-store'})
+          .then(r=> r && r.ok ? r.json() : null)
+          .then(j=>{
+            if(!j || j.version==null) return;
+            if(this._loadedVersion==null){ this._loadedVersion=j.version; return; }
+            if(String(j.version)!==String(this._loadedVersion) && !this._updateAvailable){
+              this._updateAvailable=true; this.syncSidebar();
+            }
+          }).catch(()=>{});
+      }catch(e){}
     }
 
     addCredit(){
@@ -359,8 +376,8 @@
         this.micStream=stream;
         this.micSrc=this.ctx.createMediaStreamSource(stream);
         this.analyser=this.ctx.createAnalyser();
-        this.analyser.fftSize=8192;
-        this.analyser.smoothingTimeConstant=0.5;
+        this.analyser.fftSize=16384;   // finer resolution, esp. for low notes
+        this.analyser.smoothingTimeConstant=0.4;
         this.micSrc.connect(this.analyser); // not connected to destination -> no feedback
         this.freqData=new Float32Array(this.analyser.frequencyBinCount);
         this.listening=true;
@@ -394,15 +411,20 @@
       const frame=new Array(12).fill(0);
       let any=false;
       if(mx>-90){
-        const floor=mx-30;
+        const floor=mx-52;           // wider window so softer chord tones are kept
+        const denom=Math.max(1,mx-floor);
         for(let i=minBin;i<=maxBin;i++){
           const db=this.freqData[i];
-          if(db<floor) continue;
+          if(db<floor || db<-90) continue;
+          // only count local spectral peaks so one loud note doesn't smear over the rest
+          if(db<this.freqData[i-1] || db<this.freqData[i+1]) continue;
           const f=i*binHz;
-          const mag=Math.pow(10, db/20);
+          // perceptual (dB-above-floor) weight: a note 25 dB down still contributes ~half,
+          // instead of ~1/18th with raw amplitude — this is what lets weak chord tones register
+          const w=(db-floor)/denom;
           const midi=69+12*Math.log2(f/440);
           const pc=((Math.round(midi)%12)+12)%12;
-          frame[pc]+=mag; any=true;
+          frame[pc]+=w; any=true;
         }
       }
       const sum=frame.reduce((a,b)=>a+b,0);
@@ -413,7 +435,9 @@
         if(s2>0) for(let p=0;p<12;p++) frame[p]=sup[p]/s2;
       }
       for(let p=0;p<12;p++) this.live[p]=this.live[p]*0.6+frame[p]*0.4;
-      if(any && sum>0){ for(let p=0;p<12;p++) this.acc[p]+=frame[p]; }
+      // decaying accumulator (~last several seconds) so the key ranking follows what's
+      // being played now instead of the whole session piling up on an early guess
+      if(any && sum>0){ for(let p=0;p<12;p++) this.acc[p]=this.acc[p]*0.96+frame[p]; }
       this.cands=this.detectKeys(this.acc);
       if(this.state.view==='live' && this.P('autoApply',false) && this.cands.length){
         const top=this.cands[0];
@@ -500,7 +524,7 @@
       for(let q=0;q<12;q++){
         const fifthBelow=ch[(q-7+12)%12];
         const thirdBelow=ch[(q-4+12)%12];
-        out[q]=Math.max(0, ch[q] - 0.45*fifthBelow - 0.25*thirdBelow);
+        out[q]=Math.max(0, ch[q] - 0.32*fifthBelow - 0.18*thirdBelow);
       }
       return out;
     }
@@ -551,6 +575,20 @@
       const inner=el('<div></div>');
       Object.assign(inner.style,{display:'flex',flexDirection:'column',width:'100%'});
       this._sideInner=inner;
+
+      // update banner (hidden until a newer deploy is detected)
+      const upd=el('<button type="button">&#8682;&nbsp; Update app</button>');
+      Object.assign(upd.style,{ display:'none', alignItems:'center', justifyContent:'center', width:'100%',
+        padding:'11px', marginBottom:'18px', borderRadius:'11px', cursor:'pointer', border:'1px solid #3fae7e',
+        background:'linear-gradient(180deg,#19b977,#0c7c4d)', color:'#04130c', fontFamily:'var(--font-ui),sans-serif',
+        fontSize:'12px', fontWeight:'700', letterSpacing:'1.4px', textTransform:'uppercase',
+        boxShadow:'0 8px 22px -10px rgba(25,185,119,0.6)' });
+      upd.addEventListener('click', ()=>{
+        try{ if('serviceWorker' in navigator){ navigator.serviceWorker.getRegistrations().then(rs=>rs.forEach(r=>r.update())).catch(()=>{}); } }catch(e){}
+        location.reload();
+      });
+      inner.appendChild(upd);
+      this._updateBtn=upd;
 
       this.SECTIONS.forEach((sec,si)=>{
         const wrap=el('<div></div>');
@@ -667,7 +705,9 @@
       });
       this._sideTitle.style.display = open?'inline':'none';
       this._collapseBtn.textContent = open?'‹':'›';
+      this._collapseBtn.style.borderColor = (this._updateAvailable && !open) ? '#19b977' : '#1d2026';
       this._sideInner.style.display = open?'flex':'none';
+      if(this._updateBtn) this._updateBtn.style.display = this._updateAvailable ? 'flex' : 'none';
       this._syncers.forEach(fn=>fn());
     }
 

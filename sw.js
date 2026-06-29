@@ -1,6 +1,6 @@
 /* Key Finder service worker: offline app shell.
    Bump CACHE when shipping a new version to refresh cached assets. */
-const CACHE = 'key-finder-v2';
+const CACHE = 'key-finder-v3';
 const ASSETS = [
   './',
   './index.html',
@@ -31,6 +31,7 @@ self.addEventListener('fetch', (e) => {
   let url;
   try { url = new URL(req.url); } catch (_) { return; }
   if (url.origin !== self.location.origin) return; // let cross-origin (fonts) hit network
+  if (url.pathname.endsWith('/version.json')) { e.respondWith(fetch(req)); return; } // always fresh for update checks
 
   // Navigations: network-first so deploys update, fall back to cached page offline.
   if (req.mode === 'navigate') {
