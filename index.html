@@ -2,8 +2,17 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Key Finder</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#0c0d11">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Key Finder">
+<link rel="apple-touch-icon" href="apple-touch-icon-180.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="icon" type="image/png" sizes="512x512" href="icons/icon-512.png">
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Saira:wght@300;400;500;600;700&family=Saira+Semi+Condensed:wght@400;500;600;700&display=swap');
   :root{
@@ -68,6 +77,7 @@
         {kind:'range', label:'Glow',     key:'glow',     min:0.3, max:1.8, step:0.1, unit:'×'},
         {kind:'range', label:'Key size', key:'pianoSize',min:0.85,max:2.5, step:0.05,unit:'×'},
         {kind:'range', label:'Multi-view size', key:'multiSize', min:0.6, max:2, step:0.1, unit:'×'},
+        {kind:'range', label:'Live piano size', key:'liveSize', min:1, max:3, step:0.25, unit:'×'},
         {kind:'seg',   label:'Note labels', key:'labelMode', options:['Sharps','Flats','Smart']},
       ]},
       {title:'Chords', rows:[
@@ -83,6 +93,7 @@
       ]},
       {title:'Listener', rows:[
         {kind:'toggle', label:'Harmonic cleanup', key:'harmonicClean'},
+        {kind:'toggle', label:'Auto-follow top key (Live)', key:'autoApply'},
       ]},
       {title:'Playback', rows:[
         {kind:'range', label:'Tempo', key:'tempo', min:40, max:180, step:1, unit:'BPM'},
@@ -96,9 +107,9 @@
         root:0, scale:'major', chord:null, prog:null, playing:false, flash:{}, d1:true, d2:false, sideOpen:true, view:'single',
         cfg: {
           scaleColor:'#43E08A', chordColor:'#FFD23F', seventhColor:'#B98CFF', background:'#14161B',
-          cornerStyle:'Rounded', glow:1, pianoSize:1.8, multiSize:1, labelMode:'Sharps',
+          cornerStyle:'Rounded', glow:1, pianoSize:1.8, multiSize:1, liveSize:1, labelMode:'Sharps',
           chordType:'Triads', showNumerals:true, scaleInChord:true,
-          waveform:'Triangle', volume:55, brightness:2600, sustain:1.1, harmonicClean:true,
+          waveform:'Triangle', volume:55, brightness:2600, sustain:1.1, harmonicClean:true, autoApply:false,
           tempo:67, arpeggiate:false, loop:true,
         },
       };
@@ -111,6 +122,7 @@
       this.cands = [];
       this.listening = false;
       this.micError = null;
+      this.loadState();
       this.buildSidebar();
       this.mainEl.addEventListener('click', e => {
         const t = e.target.closest('[data-act]'); if(!t) return;
@@ -127,7 +139,7 @@
           case 'playchord': this.pickStep(+a.deg); break;
           case 'listen_start': this.startListen(); break;
           case 'listen_stop':  this.stopListen(); break;
-          case 'listen_shortcut': if(this.listening){ this.stopListen(); } else { this.setState({view:'listen'}); this.startListen(); } break;
+          case 'listen_shortcut': if(this.listening){ this.stopListen(); } else { this.setState({view:'live'}); this.startListen(); } break;
           case 'listen_reset': this.acc=new Array(12).fill(0); this.live=new Array(12).fill(0); this.cands=[]; this.micError=null; this.render(); break;
           case 'applykey': this.applyKey(+a.root, a.scale); break;
           case 'd1':    this.setState(s=>({d1:!s.d1})); break;
@@ -140,10 +152,32 @@
     setState(u){
       const patch = typeof u === 'function' ? u(this.state) : u;
       Object.assign(this.state, patch);
+      this.persist();
       this.render();
     }
     P(name, def){ const v = this.state.cfg[name]; return v==null ? def : v; }
-    setCfg(key, val){ this.state.cfg[key] = val; this.render(); }
+    setCfg(key, val){ this.state.cfg[key] = val; this.persist(); this.render(); }
+    loadState(){
+      try{
+        const raw=localStorage.getItem('keyfinder.v1');
+        if(!raw) return;
+        const s=JSON.parse(raw);
+        if(s.cfg && typeof s.cfg==='object') Object.assign(this.state.cfg, s.cfg);
+        if(typeof s.root==='number') this.state.root=s.root;
+        if(s.scale==='major'||s.scale==='minor') this.state.scale=s.scale;
+        if(typeof s.sideOpen==='boolean') this.state.sideOpen=s.sideOpen;
+        if(typeof s.d1==='boolean') this.state.d1=s.d1;
+        if(typeof s.d2==='boolean') this.state.d2=s.d2;
+        let v=s.view; if(v==='listen'||v==='live') v='single';
+        if(v) this.state.view=v;
+      }catch(e){}
+    }
+    persist(){
+      try{
+        const s=this.state;
+        localStorage.setItem('keyfinder.v1', JSON.stringify({ cfg:s.cfg, root:s.root, scale:s.scale, view:s.view, sideOpen:s.sideOpen, d1:s.d1, d2:s.d2 }));
+      }catch(e){}
+    }
 
     /* ---------- music theory ---------- */
     scalePcs(){ return this.INTERVALS[this.state.scale].map(i => (this.state.root + i) % 12); }
@@ -369,6 +403,17 @@
       for(let p=0;p<12;p++) this.live[p]=this.live[p]*0.6+frame[p]*0.4;
       if(any && sum>0){ for(let p=0;p<12;p++) this.acc[p]+=frame[p]; }
       this.cands=this.detectKeys(this.acc);
+      if(this.state.view==='live' && this.P('autoApply',false) && this.cands.length){
+        const top=this.cands[0];
+        if(this._autoLast && this._autoLast.root===top.root && this._autoLast.scale===top.scale) this._autoCount=(this._autoCount||0)+1;
+        else this._autoCount=0;
+        this._autoLast=top;
+        if(this._autoCount>=3 && (top.root!==this.state.root || top.scale!==this.state.scale)){
+          this._autoCount=0;
+          this.setState({root:top.root, scale:top.scale, chord:null});
+          return;
+        }
+      }
       this.updateListen();
     }
     listenViz(){
@@ -1014,7 +1059,7 @@
             listenerPanel()+
           '</div>';
         const rightPane='<div style="flex:2 1 430px;min-width:320px;display:flex;flex-direction:column;gap:16px;">'+
-            rootRow+scaleRow+scalePiano(168)+liveReadout+
+            rootRow+scaleRow+scalePiano(Math.round(168*this.P('liveSize',1)))+liveReadout+
             '<div style="display:flex;flex-direction:column;gap:10px;"><span style="font-size:11px;letter-spacing:2.4px;color:#5f656e;text-transform:uppercase;">Chords in this key</span>'+chordGrid+'</div>'+
           '</div>';
         this.mainEl.innerHTML='<div style="display:flex;flex-direction:column;gap:18px;max-width:'+wrapMax+';margin:0;">'+viewRow+'<div style="display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap;">'+leftPane+rightPane+'</div></div>';
@@ -1026,6 +1071,14 @@
 
   new App();
 })();
+</script>
+<script>
+  /* PWA: register service worker for offline + installability (no-op outside https) */
+  if('serviceWorker' in navigator){
+    window.addEventListener('load', function(){
+      navigator.serviceWorker.register('sw.js').catch(function(){});
+    });
+  }
 </script>
 </body>
 </html>
