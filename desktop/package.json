@@ -1,0 +1,16 @@
+{
+  "name": "key-finder-desktop",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Key Finder desktop app (Tauri wrapper around the web app)",
+  "scripts": {
+    "dist": "node scripts/build-dist.mjs",
+    "icons": "tauri icon src-tauri/icons/source-1024.png",
+    "tauri": "tauri",
+    "dev": "node scripts/build-dist.mjs && tauri dev",
+    "build": "node scripts/build-dist.mjs && tauri icon src-tauri/icons/source-1024.png && tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}
