@@ -2,7 +2,7 @@
   "name": "Key Finder",
   "short_name": "Key Finder",
   "description": "A piano key and chord cheat sheet. See what's in key, explore chords and progressions, and detect a song's key by ear with the mic.",
-  "start_url": ".",
+  "start_url": "app.html",
   "scope": ".",
   "display": "standalone",
   "background_color": "#0c0d11",

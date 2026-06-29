@@ -1,9 +1,10 @@
 /* Key Finder service worker: offline app shell.
    Bump CACHE when shipping a new version to refresh cached assets. */
-const CACHE = 'key-finder-v1';
+const CACHE = 'key-finder-v2';
 const ASSETS = [
   './',
   './index.html',
+  './app.html',
   './manifest.webmanifest',
   './apple-touch-icon-180.png',
   './icons/icon-192.png',
@@ -31,14 +32,14 @@ self.addEventListener('fetch', (e) => {
   try { url = new URL(req.url); } catch (_) { return; }
   if (url.origin !== self.location.origin) return; // let cross-origin (fonts) hit network
 
-  // Navigations: network-first so deploys update, fall back to cached shell offline.
+  // Navigations: network-first so deploys update, fall back to cached page offline.
   if (req.mode === 'navigate') {
     e.respondWith(
       fetch(req).then((res) => {
         const copy = res.clone();
-        caches.open(CACHE).then((c) => c.put('./index.html', copy));
+        caches.open(CACHE).then((c) => c.put(req, copy));
         return res;
-      }).catch(() => caches.match('./index.html'))
+      }).catch(() => caches.match(req).then((m) => m || caches.match('./app.html') || caches.match('./index.html')))
     );
     return;
   }
