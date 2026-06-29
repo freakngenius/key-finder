@@ -104,7 +104,7 @@
 
     constructor(){
       this.state = {
-        root:0, scale:'major', chord:null, prog:null, playing:false, flash:{}, d1:true, d2:false, sideOpen:true, view:'single',
+        root:0, scale:'major', chord:null, prog:null, playing:false, flash:{}, d1:true, d2:false, sideOpen:true, view:'single', liveRight:'keys',
         cfg: {
           scaleColor:'#43E08A', chordColor:'#FFD23F', seventhColor:'#B98CFF', background:'#14161B',
           cornerStyle:'Rounded', glow:1, pianoSize:1.8, multiSize:1, liveSize:1, labelMode:'Sharps',
@@ -136,6 +136,7 @@
           case 'step':  this.pickStep(+a.deg); break;
           case 'play':  this.togglePlay(); break;
           case 'view':  if(a.val!=='listen' && a.val!=='live' && this.listening) this.stopListen(); this.setState({view:a.val}); break;
+          case 'liveright': this.setState({liveRight:a.val}); break;
           case 'playchord': this.pickStep(+a.deg); break;
           case 'listen_start': this.startListen(); break;
           case 'listen_stop':  this.stopListen(); break;
@@ -147,6 +148,17 @@
         }
       });
       this.render();
+      this.addCredit();
+    }
+
+    addCredit(){
+      const c=document.createElement('div');
+      c.innerHTML='Made with <span style="color:#ff6f9d;">&#9829;</span> by <a href="https://x.com/KyleKesterson" target="_blank" rel="noopener" style="color:#9aa0aa;text-decoration:none;border-bottom:1px solid #2a2e39;">@KyleKesterson</a>';
+      Object.assign(c.style,{ position:'fixed', right:'14px', bottom:'10px', zIndex:'50',
+        fontFamily:'var(--font-ui),system-ui,sans-serif', fontSize:'11px', letterSpacing:'.3px',
+        color:'#565c6b', background:'rgba(8,9,11,0.6)', padding:'4px 9px', borderRadius:'8px',
+        backdropFilter:'blur(4px)', pointerEvents:'auto' });
+      document.body.appendChild(c);
     }
 
     setState(u){
@@ -686,75 +698,65 @@
       // page bg
       this.pageEl.style.background='radial-gradient(125% 80% at 60% -10%, '+this.P('background','#14161B')+' 0%, #000 72%)';
 
-      /* piano */
-      const WW=52*k, WH=204*k, BW=32*k, BH=126*k, gap=6*k;
-      const boxW=7*WW+6*gap;
-      const whiteBase={ position:'relative', width:WW+'px', height:WH+'px',
-        borderRadius: sharp?'0px':'0 0 '+(8*k)+'px '+(8*k)+'px',
-        display:'flex', alignItems:'flex-end', justifyContent:'center', paddingBottom:(13*k)+'px',
-        cursor:'pointer', fontFamily:'var(--font-ui),sans-serif', fontSize:(13*k)+'px', fontWeight:600,
-        letterSpacing:'.5px', transition:'all .12s ease', userSelect:'none',
-        background:'linear-gradient(180deg,#1b1e23 0%,#0e1014 100%)', border:'1px solid #2a2d34',
-        color:'#5b616b', boxShadow:'0 2px 0 #000, inset 0 1px 0 rgba(255,255,255,.04)' };
-      const blackBase={ position:'absolute', top:'0', width:BW+'px', height:BH+'px',
-        borderRadius: sharp?'0px':'0 0 '+(6*k)+'px '+(6*k)+'px',
-        display:'flex', alignItems:'flex-end', justifyContent:'center', paddingBottom:(10*k)+'px',
-        cursor:'pointer', zIndex:3, fontFamily:'var(--font-ui),sans-serif', fontSize:(9*k)+'px', fontWeight:600,
-        letterSpacing:'.3px', transition:'all .12s ease', userSelect:'none', color:'#8b929c',
-        background:'linear-gradient(180deg,#08090c 0%,#1a1d22 100%)', border:'1px solid #000',
-        boxShadow:'0 4px 7px rgba(0,0,0,.6), inset 0 -1px 0 rgba(255,255,255,.05)' };
-      const colorize=(o,pc,black,tones,cR,sv,dim)=>{
-        if(tones.includes(pc)){
-          const root=pc===cR, isSev=pc===sv;
-          const C=isSev?V:Y;
-          const a=Math.min(1,(root?1:0.78)*gl);
-          o.color=isSev?'#ece0ff':(root?'#fff6d6':'#ffe5a3');
-          o.borderColor='rgba('+C+','+(root?.95:.7)+')';
-          o.background= black
-            ? 'linear-gradient(180deg,#0a0b0e 0%,'+this.mix(C,root?.5:.34)+' 100%)'
-            : 'linear-gradient(180deg,rgba('+C+','+(root?.26:.15)+') 0%,#0e1014 '+(root?64:60)+'%)';
-          o.boxShadow='inset 0 -38px '+(root?42:34)+'px '+(root?-12:-16)+'px rgba('+C+','+a+'), 0 0 '+Math.round((root?26:16)*gl)+'px -8px rgba('+C+','+a+')';
-        } else if(scalePcs.includes(pc) && !dim){
-          o.color='#cfeede';
-          o.borderColor='rgba('+G+',.5)';
-          o.background= black
-            ? 'linear-gradient(180deg,#08090c 0%,'+this.mix(G,.34)+' 100%)'
-            : 'linear-gradient(180deg,rgba('+G+',.13) 0%,#0e1014 62%)';
+      /* piano rendering (range-aware: chords read left-to-right ascending, extending octaves as needed) */
+      const NATS=[0,2,4,5,7,9,11];
+      const isW=pc=>NATS.includes(pc);
+      const applyRole=(o,role,black)=>{
+        if(role==='root'||role==='chord'||role==='sev'){
+          const isRoot=role==='root', isSev=role==='sev', C=isSev?V:Y, a=Math.min(1,(isRoot?1:0.78)*gl);
+          o.color=isSev?'#ece0ff':(isRoot?'#fff6d6':'#ffe5a3');
+          o.borderColor='rgba('+C+','+(isRoot?.95:.7)+')';
+          o.background= black ? 'linear-gradient(180deg,#0a0b0e 0%,'+this.mix(C,isRoot?.5:.34)+' 100%)'
+            : 'linear-gradient(180deg,rgba('+C+','+(isRoot?.26:.15)+') 0%,#0e1014 '+(isRoot?64:60)+'%)';
+          o.boxShadow='inset 0 -38px '+(isRoot?42:34)+'px '+(isRoot?-12:-16)+'px rgba('+C+','+a+'), 0 0 '+Math.round((isRoot?26:16)*gl)+'px -8px rgba('+C+','+a+')';
+        } else if(role==='keyroot'){
+          o.color='#eafff5'; o.borderColor='rgba('+G+',0.95)';
+          o.background= black ? 'linear-gradient(180deg,#08090c 0%,'+this.mix(G,0.5)+' 100%)' : 'linear-gradient(180deg,rgba('+G+',0.42) 0%,#0e1014 64%)';
+          o.boxShadow= black ? 'inset 0 -16px 18px -10px rgba('+G+',0.7)' : 'inset 0 -30px 30px -14px rgba('+G+',0.85)';
+        } else if(role==='scale'){
+          o.color='#cfeede'; o.borderColor='rgba('+G+',.5)';
+          o.background= black ? 'linear-gradient(180deg,#08090c 0%,'+this.mix(G,.34)+' 100%)' : 'linear-gradient(180deg,rgba('+G+',.13) 0%,#0e1014 62%)';
           o.boxShadow='inset 0 -26px 30px -18px rgba('+G+','+Math.min(1,.7*gl)+'), 0 0 0 1px rgba('+G+',.12)';
         }
-        return o;
       };
-      const keyStyle=(pc,black)=>{
-        const o=Object.assign({}, black?blackBase:whiteBase);
-        colorize(o,pc,black,tri,cRoot,sevPc,dimScale);
-        if(fl(pc)) o.filter='brightness(1.7)';
-        return o;
+      // voiced offsets (semitones from C of the root's octave), ascending so chords never wrap
+      const chordOffsets=pcs=>{ const out=[]; let prev=-1; pcs.forEach((pc,i)=>{ let off=pc; if(i>0){ while(off<=prev) off+=12; } prev=off; out.push(off); }); return out; };
+      const chordSpanFor=(deg,dim)=>{
+        const pcs=this.chordTones(deg), offs=chordOffsets(pcs), rootOff=offs[0], sevOff=this.isSeventh()?offs[offs.length-1]:-1;
+        const set={}; offs.forEach(x=>{ set[x]=1; });
+        const span=Math.max(12, Math.ceil((offs[offs.length-1]+1)/12)*12);
+        const roleAt=(o,off,pc,black)=>{ if(set[off]){ applyRole(o, off===rootOff?'root':(off===sevOff?'sev':'chord'), black); } else if(!dim && scalePcs.includes(pc)){ applyRole(o,'scale',black); } };
+        return { span, roleAt, octaves: span/12 };
       };
+      const scaleRoleAt=(o,off,pc,black)=>{ if(pc===S.root){ applyRole(o,'keyroot',black); } else if(scalePcs.includes(pc)){ applyRole(o,'scale',black); } };
 
-      /* responsive mini piano (for multi-chord views) */
-      const WHITEFRAC=100/7, BWPCT=(100/7)*0.62;
+      /* responsive keys + a generic span builder so any number of octaves can render */
       const respWhite=H=>({ position:'relative', flex:'1 1 0', minWidth:'0', height:H+'px',
         borderRadius: sharp?'0px':'0 0 5px 5px', display:'flex', alignItems:'flex-end', justifyContent:'center',
         paddingBottom:Math.round(H*0.10)+'px', fontFamily:'var(--font-ui),sans-serif',
         fontSize:Math.max(8,Math.round(H*0.135))+'px', fontWeight:600, letterSpacing:'.3px',
         background:'linear-gradient(180deg,#1b1e23 0%,#0e1014 100%)', border:'1px solid #2a2d34',
         color:'#5b616b', boxShadow:'0 1px 0 #000', userSelect:'none', overflow:'hidden' });
-      const respBlack=H=>({ position:'absolute', top:'0', width:BWPCT+'%', height:Math.round(H*0.62)+'px',
+      const respBlack=H=>({ position:'absolute', top:'0', height:Math.round(H*0.62)+'px',
         borderRadius: sharp?'0px':'0 0 4px 4px', display:'flex', alignItems:'flex-end', justifyContent:'center',
         paddingBottom:Math.round(H*0.08)+'px', fontFamily:'var(--font-ui),sans-serif',
         fontSize:Math.max(7,Math.round(H*0.10))+'px', fontWeight:600, color:'#8b929c', zIndex:3,
         background:'linear-gradient(180deg,#08090c 0%,#1a1d22 100%)', border:'1px solid #000', userSelect:'none', overflow:'hidden' });
+      // render a keyboard of `span` semitones (from C), coloring each key via roleAt(o,off,pc,black)
+      const buildSpan=(span,H,roleAt,interactive)=>{
+        const whites=[], blacks=[];
+        for(let off=0; off<span; off++){ const pc=off%12; if(isW(pc)) whites.push({off,pc}); else blacks.push({off,pc,pw:whites.length-1}); }
+        const wc=whites.length, frac=100/wc, bwp=frac*0.62;
+        const wh=whites.map(w=>{ const o=respWhite(H); roleAt(o,w.off,w.pc,false); if(fl(w.pc)) o.filter='brightness(1.7)';
+          return '<div '+(interactive?'data-act="key" data-pc="'+w.pc+'" ':'')+'style="'+css(o)+'"><span style="pointer-events:none">'+nm(w.pc)+'</span></div>'; }).join('');
+        const bh=blacks.map(b=>{ const o=respBlack(H); o.width=bwp+'%'; o.left=((b.pw+1)*frac - bwp/2)+'%'; roleAt(o,b.off,b.pc,true); if(fl(b.pc)) o.filter='brightness(1.7)';
+          return '<div '+(interactive?'data-act="key" data-pc="'+b.pc+'" ':'')+'style="'+css(o)+'"><span style="pointer-events:none">'+nm(b.pc)+'</span></div>'; }).join('');
+        return '<div style="position:relative;width:100%;"><div style="display:flex;gap:3px;width:100%;">'+wh+'</div>'+bh+'</div>';
+      };
+      // a chord on its own ascending keyboard (mini card)
       const miniPiano=(deg,H,active)=>{
-        const tones=this.chordTones(deg), cR=tones[0], sv=this.isSeventh()?tones[3]:null;
-        const whites=[0,2,4,5,7,9,11].map(pc=>{
-          const o=respWhite(H); colorize(o,pc,false,tones,cR,sv,true); if(fl(pc)) o.filter='brightness(1.7)';
-          return '<div style="'+css(o)+'"><span style="pointer-events:none">'+nm(pc)+'</span></div>';
-        }).join('');
-        const blacks=[[1,0],[3,1],[6,3],[8,4],[10,5]].map(([pc,wi])=>{
-          const o=respBlack(H); o.left=((wi+1)*WHITEFRAC - BWPCT/2)+'%';
-          colorize(o,pc,true,tones,cR,sv,true); if(fl(pc)) o.filter='brightness(1.7)';
-          return '<div style="'+css(o)+'"><span style="pointer-events:none">'+nm(pc)+'</span></div>';
-        }).join('');
+        const cs=chordSpanFor(deg,true);
+        const body=buildSpan(cs.span,H,cs.roleAt,false);
         const card={ display:'flex', flexDirection:'column', gap:'8px', padding:'10px 10px 12px',
           background:'#0a0b0e', border: active?'1px solid rgba('+Y+',.85)':'1px solid #1a1d22',
           borderRadius:R(12), cursor:'pointer', transition:'all .12s ease',
@@ -762,26 +764,16 @@
         const head='<div style="display:flex;align-items:baseline;gap:6px;min-width:0;">'+
           (showNum?'<span style="font-family:var(--font-display),sans-serif;font-size:11px;letter-spacing:1px;color:#6b7079;flex-shrink:0;">'+this.numeral(deg)+'</span>':'')+
           '<span style="font-size:15px;font-weight:600;color:'+cfg.chordColor+';white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+this.chordName(deg)+'</span></div>';
-        const body='<div style="position:relative;width:100%;"><div style="display:flex;gap:2px;width:100%;">'+whites+'</div>'+blacks+'</div>';
         return '<div data-act="playchord" data-deg="'+deg+'" style="'+css(card)+'">'+head+body+'</div>';
       };
-
-      /* responsive scale piano (shows in-key notes + selected chord); used by Live view */
-      const scalePiano=(H)=>{
-        const whites=[0,2,4,5,7,9,11].map(pc=>{
-          const o=respWhite(H); colorize(o,pc,false,tri,cRoot,sevPc,dimScale);
-          if(chord==null && pc===S.root){ o.borderColor='rgba('+G+',0.95)'; o.color='#eafff5'; o.background='linear-gradient(180deg,rgba('+G+',0.42) 0%,#0e1014 64%)'; o.boxShadow='inset 0 -30px 30px -14px rgba('+G+',0.85)'; }
-          if(fl(pc)) o.filter='brightness(1.7)';
-          return '<div data-act="key" data-pc="'+pc+'" style="'+css(o)+'"><span style="pointer-events:none">'+nm(pc)+'</span></div>';
-        }).join('');
-        const blacks=[[1,0],[3,1],[6,3],[8,4],[10,5]].map(([pc,wi])=>{
-          const o=respBlack(H); o.left=((wi+1)*WHITEFRAC - BWPCT/2)+'%'; colorize(o,pc,true,tri,cRoot,sevPc,dimScale);
-          if(chord==null && pc===S.root){ o.borderColor='rgba('+G+',0.95)'; o.color='#eafff5'; o.background='linear-gradient(180deg,#08090c 0%,'+this.mix(G,0.5)+' 100%)'; }
-          if(fl(pc)) o.filter='brightness(1.7)';
-          return '<div data-act="key" data-pc="'+pc+'" style="'+css(o)+'"><span style="pointer-events:none">'+nm(pc)+'</span></div>';
-        }).join('');
+      // main scale/chord keyboard (single & live). chord -> ascending span; else one octave scale.
+      const scalePanel=(H)=>{
+        let span, roleAt;
+        if(chord!=null){ const cs=chordSpanFor(chord,dimScale); span=cs.span; roleAt=cs.roleAt; }
+        else { span=12; roleAt=scaleRoleAt; }
+        const maxW=Math.round(H*1.95*(span/12));
         const panel={ background:'linear-gradient(180deg,#101218,#0a0b0e)', border:'1px solid #1a1d22', borderRadius:R(18), padding:'16px', boxShadow:'0 24px 60px -24px rgba(0,0,0,.9)', overflow:'hidden' };
-        return '<div style="'+css(panel)+'"><div style="position:relative;width:100%;max-width:'+Math.round(H*1.95)+'px;margin:0 auto;"><div style="display:flex;gap:3px;width:100%;">'+whites+'</div>'+blacks+'</div></div>';
+        return '<div style="'+css(panel)+'"><div style="width:100%;max-width:'+maxW+'px;margin:0 auto;">'+buildSpan(span,H,roleAt,true)+'</div></div>';
       };
 
       /* listener panel (visualizer + candidates), shared by Listen and Live views */
@@ -824,26 +816,6 @@
             '</div>'+
           '</div>';
       };
-
-      const whitePcs=[0,2,4,5,7,9,11];
-      const whiteHtml=whitePcs.map(pc=>
-        '<div data-act="key" data-pc="'+pc+'" style="'+css(keyStyle(pc,false))+'"><span style="pointer-events:none">'+nm(pc)+'</span></div>'
-      ).join('');
-      const blackDefs=[[1,0],[3,1],[6,3],[8,4],[10,5]];
-      const blackHtml=blackDefs.map(([pc,wi])=>{
-        const st=keyStyle(pc,true);
-        st.left=(wi*(WW+gap)+WW+gap/2-BW/2)+'px';
-        return '<div data-act="key" data-pc="'+pc+'" style="'+css(st)+'"><span style="pointer-events:none">'+nm(pc)+'</span></div>';
-      }).join('');
-      const feltStyle={ height:'5px', width:boxW+'px', maxWidth:'100%', borderRadius:R(3), transition:'background .15s ease',
-        background: chord!=null
-          ? 'linear-gradient(90deg,rgba('+Y+',0),rgba('+Y+',.35),rgba('+Y+',0))'
-          : 'linear-gradient(90deg,rgba('+G+',0),rgba('+G+',.28),rgba('+G+',0))' };
-      const panelStyle={ background:'linear-gradient(180deg,#101218,#0a0b0e)', border:'1px solid #1a1d22', borderRadius:R(18),
-        padding:'18px 18px 22px', display:'flex', flexDirection:'column', alignItems:'center', gap:'16px',
-        boxShadow:'0 24px 60px -24px rgba(0,0,0,.9), inset 0 1px 0 rgba(255,255,255,.03)', overflow:'hidden' };
-      const pianoBoxStyle={ position:'relative', width:boxW+'px', height:WH+'px', maxWidth:'100%' };
-      const whiteRowStyle={ display:'flex', gap:gap+'px', height:WH+'px', width:boxW+'px' };
 
       /* root buttons */
       const rootBtn=pc=>{
@@ -1030,10 +1002,7 @@
           '<span style="display:block;margin-top:14px;font-size:11.5px;color:#565c6b;line-height:1.45;">Best guess from a live room is approximate. A clean source reads best. Tap a key to load it into the piano. Try the Live view to keep the piano and chords visible while it listens.</span>';
       } else {
         pianoContent=
-          '<div style="'+css(panelStyle)+'">'+
-            '<div style="'+css(feltStyle)+'"></div>'+
-            '<div style="'+css(pianoBoxStyle)+'"><div style="'+css(whiteRowStyle)+'">'+whiteHtml+'</div>'+blackHtml+'</div>'+
-          '</div>'+
+          scalePanel(Math.round(120*k))+
           '<div style="'+css(readoutBox)+'">'+
             '<span style="color:'+titleColor+';font-size:18px;font-weight:600;letter-spacing:.5px;font-family:var(--font-display),sans-serif;">'+readoutTitle+'</span>'+
             '<span style="color:#3a3e45;margin:0 12px;font-size:15px;">·</span>'+
@@ -1053,14 +1022,32 @@
             '<span style="color:#3a3e45;margin:0 12px;font-size:15px;">·</span>'+
             '<span style="color:#9aa0aa;font-size:15px;letter-spacing:3px;font-weight:500;">'+readoutNotes+'</span>'+
           '</div>';
-        const chordGrid='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(74px,1fr));gap:7px;">'+chordHtml+'</div>';
         const leftPane='<div style="flex:1 1 290px;min-width:260px;max-width:380px;display:flex;flex-direction:column;gap:12px;">'+
             '<span style="font-size:11px;letter-spacing:2.4px;color:#5f656e;text-transform:uppercase;">Listening</span>'+
             listenerPanel()+
           '</div>';
+        // right-pane display toggle: keyboard vs all chords
+        const lrSeg=v=>({ padding:'7px 14px', borderRadius:R(8), fontFamily:'var(--font-ui),sans-serif', fontSize:'12px',
+          fontWeight:600, letterSpacing:'.8px', cursor:'pointer', border:'none', transition:'all .12s ease',
+          background: S.liveRight===v?'#262a31':'transparent', color: S.liveRight===v?'#fff':'#7c828c',
+          boxShadow: S.liveRight===v?'inset 0 0 0 1px #3a3f47':'none', textTransform:'uppercase', whiteSpace:'nowrap' });
+        const lrToggle='<div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;">'+
+            '<span style="font-size:11px;letter-spacing:2.4px;color:#5f656e;text-transform:uppercase;">Display</span>'+
+            '<div style="'+css(toggleWrap)+'">'+
+              '<button type="button" data-act="liveright" data-val="keys" style="'+css(lrSeg('keys'))+'">Keyboard</button>'+
+              '<button type="button" data-act="liveright" data-val="chords" style="'+css(lrSeg('chords'))+'">Chords</button>'+
+            '</div>'+
+          '</div>';
+        let rightDisplay;
+        if(S.liveRight==='chords'){
+          const H=Math.round(96*this.P('liveSize',1));
+          const grid=[0,1,2,3,4,5,6].map(d=>miniPiano(d,H,chord===d)).join('');
+          rightDisplay='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax('+Math.round(186*this.P('liveSize',1))+'px,1fr));gap:12px;">'+grid+'</div>';
+        } else {
+          rightDisplay=scalePanel(Math.round(150*this.P('liveSize',1)))+liveReadout;
+        }
         const rightPane='<div style="flex:2 1 430px;min-width:320px;display:flex;flex-direction:column;gap:16px;">'+
-            rootRow+scaleRow+scalePiano(Math.round(168*this.P('liveSize',1)))+liveReadout+
-            '<div style="display:flex;flex-direction:column;gap:10px;"><span style="font-size:11px;letter-spacing:2.4px;color:#5f656e;text-transform:uppercase;">Chords in this key</span>'+chordGrid+'</div>'+
+            rootRow+scaleRow+lrToggle+rightDisplay+
           '</div>';
         this.mainEl.innerHTML='<div style="display:flex;flex-direction:column;gap:18px;max-width:'+wrapMax+';margin:0;">'+viewRow+'<div style="display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap;">'+leftPane+rightPane+'</div></div>';
         return;
